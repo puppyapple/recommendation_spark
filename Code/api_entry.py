@@ -1,8 +1,11 @@
+#%%
 import flask
 import json
+import sys 
+sys.path.append("D:\\标签图谱\\标签关系\\recommendation_spark\\Code\\")
 import Code.recommendation
 from flask import request
-
+#%%
 server = flask.Flask(__name__)
 @server.route("/recommendation", methods=["post"])
 def rec():

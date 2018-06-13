@@ -1,7 +1,9 @@
+#%%
 import pickle
 import pandas as pd
 import numpy as np
 import multiprocessing as mp
+import configparser
 from py2neo import Graph
 from functools import reduce
 from itertools import product
@@ -11,6 +13,7 @@ from sklearn.preprocessing import MinMaxScaler
 from pyspark import SparkContext 
 from pyspark.sql import SQLContext 
 
+#%%
 path_comp_tags_all = "../Data/Output/recommendation/comp_tags_all.pkl"
 path_ctag_ctag = "../Data/Output/recommendation/ctag_ctag.pkl"
 path_ctag_nctag = "../Data/Output/recommendation/ctag_nctag.pkl"
@@ -18,6 +21,17 @@ path_nctag_nctag = "../Data/Output/recommendation/nctag_nctag.pkl"
 path_concept_tree_property = "../Data/Output/recommendation/concept_tree_property.pkl"
 path_ctag_position = "../Data/Output/recommendation/ctag_position.pkl"
 path_comp_id_name_dict = "../Data/Output/recommendation/comp_id_name_dict.pkl"
+
+config = configparser.ConfigParser()
+config.read("../Data/Input/database_config/database.conf")
+host = config['NEO4J']['host']
+user_name = config['NEO4J']['username']
+pass_word = config['NEO4J']['password']
+graph = Graph(
+    host,
+    username=user_name,
+    password=pass_word
+)
 
 def final_count(l1, l2):
     if len(l1.union(l2)) == 0:
@@ -43,18 +57,6 @@ def data_loader():
     print("Data loaded!")
     return (comp_infos, ctag_ctag, ctag_nctag, nctag_nctag, ctag_position, comp_id_name_dict)
 
-
-comp_infos, ctag_ctag, ctag_nctag, nctag_nctag, ctag_position, comp_id_name_dict = data_loader()
-config = configparser.ConfigParser()
-config.read("../Data/Input/database_config/database.conf")
-host = config['NEO4J']['host']
-user_name = config['NEO4J']['username']
-pass_word = config['NEO4J']['password']
-graph = Graph(
-    host,
-    username=user_name,
-    password=pass_word
-)
 
 def cal_tag_cartesian(tag_set1, tag_set2, value_dict, tag_link_filter):
     if tag_set1 == 0 or tag_set2 == 0:
@@ -88,6 +90,27 @@ def cal_tags_link(comp_info1, comp_info2, tag_link_filters):
     v3 = coef4 * cal_tag_cartesian(nctags1, nctags2, nctag_nctag, tag_link_filters[2])
     return (v1, v2, v3)
 
+def cal_tags_link_with_target(target_comp_info, ctag_list, nctag_list, tag_link_filters):
+    ctags1 = target_comp_info.get("ctags", [])
+    nctags1 = target_comp_info.get("nctags", [])
+
+    num_ctags1 = len(ctags1)
+    num_ctags2 = len(ctag_list)
+    num_nctags1 = len(nctags1)
+    num_nctags2 = len(nctag_list)
+    num_all1 = num_ctags1 + num_nctags1
+    num_all2 = num_ctags2 + num_nctags2
+    
+    coef1 = 1/np.sqrt(1 + (num_ctags1 - num_ctags2)**2)
+    coef2 = 1/np.sqrt(1 + (num_nctags1 - num_nctags2)**2)
+    coef3 = final_count(ctags1, ctag_list)
+    coef4 = final_count(nctags1, nctag_list)
+    
+    v1 = coef3 * cal_tag_cartesian(ctags1, ctag_list, ctag_ctag, tag_link_filters[0])
+    v2 = cal_tag_cartesian(nctags1, ctag_list, ctag_nctag, tag_link_filters[1]) + cal_tag_cartesian(nctag_list, ctags1, ctag_nctag, tag_link_filters[1])
+    v3 = coef4 * cal_tag_cartesian(nctags1, nctag_list, nctag_nctag, tag_link_filters[2])
+    return (v1, v2, v3)
+
 def cal_company_dis(target_comp_info, part,  weights, tag_link_filters):
     # print("start")
     three_value_list = list(part.comp_property_dict.apply(lambda x: cal_tags_link(target_comp_info, x, tag_link_filters)))
@@ -115,4 +138,26 @@ def branch_stock_relation(comp_id, graph):
 
 
 def recommendation(comp_name, graph=graph, weights=(0.5, 0.4, 0.1), response_num=None, tag_link_filters=(0.0, 0.3, 0.3)):
-    
+    return 0
+
+#%%
+comp_infos, ctag_ctag, ctag_nctag, nctag_nctag, ctag_position, comp_id_name_dict = data_loader()
+
+#%%
+sc = SparkContext.getOrCreate()
+sqlContext=SQLContext(sc)
+comp_tags_all = pickle.load(open("../Data/Output/recommendation/comp_tags_all.pkl", "rb"))
+comp_tags_all_df_dict = pd.DataFrame.from_dict(comp_tags_all, orient="index")
+comp_tags_all_df_dict.fillna(1.0, inplace=True)
+comp_tags_all_df_list = comp_tags_all_df_dict.applymap(lambda x: list(x) if x != 1.0 else []).reset_index().rename(index=str, columns={"index": "comp_id"})
+comp_tags_all_spark_df = sqlContext.createDataFrame(comp_tags_all_df_list)
+comp_tags_all_spark_df.cache()
+comp_tags_all_spark_df.show(1)
+
+#%%
+target_comp = comp_tags_all.get("17286238067736781588")
+comp_tags_all_spark_df.repartition(1000)
+
+#%%
+result_test_rdd = comp_tags_all_spark_df.rdd.map(lambda x: x[0]).zip(comp_tags_all_spark_df.rdd.map(lambda x: cal_tags_link_with_target(target_comp, x[1], x[2], (0, 0, 0))))
+result_test_df = result_test_rdd.toDF(["comp_id", "result"])
